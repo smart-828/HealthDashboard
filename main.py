@@ -660,17 +660,34 @@ elif "Body Composition" in view_mode:
                 fig.update_layout(title="Body Fat %")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # Extra metrics
-        extra_cols = ["muscle_mass_kg", "bone_mass_kg", "body_water_pct",
-                      "bmr_kcal", "body_age"]
-        available  = [c for c in extra_cols if c in df_scale.columns
-                      and df_scale[c].notna().any()]
-        if available:
-            st.markdown("**Other Body Metrics Over Time**")
-            fig_extra = px.line(df_scale, x="date", y=available,
-                                markers=True,
-                                title="Muscle, Bone, Water, BMR, Body Age")
-            st.plotly_chart(fig_extra, use_container_width=True)
+        # Extra metrics – split into 3 charts by scale
+        st.markdown("**Other Body Metrics Over Time**")
+        col5, col6 = st.columns(2)
+
+        with col5:
+            mass_cols = [c for c in ["muscle_mass_kg", "bone_mass_kg"]
+                         if c in df_scale.columns and df_scale[c].notna().any()]
+            if mass_cols:
+                fig = px.line(df_scale, x="date", y=mass_cols, markers=True,
+                              title="Muscle & Bone Mass (kg)",
+                              labels={"value": "kg", "variable": "Metric"})
+                st.plotly_chart(fig, use_container_width=True)
+
+        with col6:
+            pct_cols = [c for c in ["body_water_pct", "body_age"]
+                        if c in df_scale.columns and df_scale[c].notna().any()]
+            if pct_cols:
+                fig = px.line(df_scale, x="date", y=pct_cols, markers=True,
+                              title="Body Water % & Body Age",
+                              labels={"value": "Value", "variable": "Metric"})
+                st.plotly_chart(fig, use_container_width=True)
+
+        if "bmr_kcal" in df_scale.columns and df_scale["bmr_kcal"].notna().any():
+            fig = px.line(df_scale, x="date", y="bmr_kcal", markers=True,
+                          title="Basal Metabolic Rate (kcal)",
+                          labels={"bmr_kcal": "kcal"})
+            fig.update_traces(line=dict(color="#e67e22"))
+            st.plotly_chart(fig, use_container_width=True)
 
 else:  # Full Summary
     st.markdown("### 📊 Full Summary")
