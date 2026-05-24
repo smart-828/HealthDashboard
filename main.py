@@ -214,18 +214,20 @@ def extract_kardia_pdf(file) -> dict | None:
                 determination = det
                 break
 
-        # Date & time  –  "Tuesday, 23 Jul 2024, 3:12 am"
+        # Date & time – "Recorded on: Heart Rate:\nMonday, 22 Jul 2024, 4:56pm 54 BPM"
+        # Date is on the line AFTER "Recorded on:"
+        recorded_date     = datetime.now().strftime("%Y-%m-%d")
+        recorded_datetime = datetime.now().strftime("%Y-%m-%d %H:%M")
         dt_match = re.search(
-            r'Recorded\s+on[:\s]+(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*,?\s*)?'
+            r'Recorded\s+on:.*?\n'
+            r'(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?'
             r'(\d{1,2}\s+\w+\s+\d{4},?\s*\d{1,2}:\d{2}\s*(?:am|pm)?)',
             text, re.IGNORECASE)
-        recorded_date = datetime.now().strftime("%Y-%m-%d")
-        recorded_datetime = datetime.now().strftime("%Y-%m-%d %H:%M")
         if dt_match:
             raw = dt_match.group(1).strip().rstrip(",")
             for fmt in ("%d %b %Y, %I:%M %p", "%d %B %Y, %I:%M %p",
-                        "%d %b %Y %I:%M %p",  "%d %b %Y, %H:%M",
-                        "%d %B %Y %H:%M"):
+                        "%d %b %Y %I:%M%p",   "%d %b %Y, %I:%M%p",
+                        "%d %b %Y %H:%M",     "%d %B %Y %H:%M"):
                 try:
                     dt_obj = datetime.strptime(raw, fmt)
                     recorded_date     = dt_obj.strftime("%Y-%m-%d")
