@@ -5,10 +5,12 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 import pdfplumber
 from PIL import Image
-import pytesseract
 import re
 import urllib.parse
 import requests
+import base64
+import json
+import io
 
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
@@ -245,125 +247,114 @@ def extract_kardia_pdf(file) -> dict | None:
         return None
 
 # ─────────────────────────────────────────────
-#  IMAGE EXTRACTION  – Fitdays scale
+#  IMAGE EXTRACTION  – Fitdays scale via Claude Vision
 # ─────────────────────────────────────────────
 def extract_fitdays_image(file) -> dict | None:
     try:
-        img  = Image.open(file)
-        text = pytesseract.image_to_string(img)
+        # Read and encode image as base64
+        img_bytes = file.read()
+        img_b64   = base64.standard_b64encode(img_bytes).decode("utf-8")
 
-        def find(pattern, txt=text):
-            m = re.search(pattern, txt, re.IGNORECASE)
-            return float(m.group(1)) if m else None
+        # Detect media type
+        img_obj    = Image.open(io.BytesIO(img_bytes))
+        fmt        = (img_obj.format or "JPEG").lower()
+        media_type = f"image/{'jpeg' if fmt in ('jpg','jpeg') else fmt}"
 
-        def find_int(pattern, txt=text):
-            m = re.search(pattern, txt, re.IGNORECASE)
-            return int(m.group(1)) if m else None
-
-        def find_str(pattern, txt=text):
-            m = re.search(pattern, txt, re.IGNORECASE)
-            return m.group(1).strip() if m else None
-
-        # Flatten text for most searches (handles line-split values)
-        flat = " ".join(text.split())
-
-        def findf(pattern):
-            m = re.search(pattern, flat, re.IGNORECASE)
-            return float(m.group(1)) if m else None
-
-        def find_intf(pattern):
-            m = re.search(pattern, flat, re.IGNORECASE)
-            return int(m.group(1)) if m else None
-
-        def find_strf(pattern):
-            m = re.search(pattern, flat, re.IGNORECASE)
-            return m.group(1).strip() if m else None
-
-        # Date  –  "08:32 May.10,2026"
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        dt_match = re.search(
-            r'(\d{1,2}:\d{2})\s+'
-            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[.\s,]+'
-            r'(\d{1,2})[,.\s]+(\d{4})',
-            flat, re.IGNORECASE)
-        if dt_match:
-            try:
-                raw = f"{dt_match.group(2)} {dt_match.group(3)} {dt_match.group(4)}"
-                date_str = datetime.strptime(raw, "%b %d %Y").strftime("%Y-%m-%d")
-            except ValueError:
-                pass
-
-        weight      = findf(r'Weight\s+([\d.]+)\s*kg')
-        bmi_val     = findf(r'BMI\s+([\d.]+)')
-        body_fat    = findf(r'Body\s+Fat\s+([\d.]+)\s*%')
-        fat_mass    = findf(r'Fat\s+Mass\s+([\d.]+)\s*kg')
-        fat_free    = findf(r'Fat.free\s+Body\s+Weight\s+([\d.]+)\s*kg')
-        hr_scale    = find_intf(r'Heart\s+Rate\s+(\d+)\s*bpm')
-        cardiac_idx = findf(r'Cardiac\s+Index\s+([\d.]+)')
-        muscle_mass = findf(r'Muscle\s+Mass\s+([\d.]+)\s*kg')
-        muscle_rate = findf(r'Muscle\s+Rate\s+([\d.]+)\s*%')
-        # Skeletal muscle splits across lines — find % after the Bone Mass block
-        m_skel      = re.search(r'Skeletal\s+Muscle\s+(?:Bone\s+Mass\s+[\d.]+kg\s+\w+\s+)?([\d.]+)\s*%', flat, re.IGNORECASE)
-        skel_muscle = float(m_skel.group(1)) if m_skel else None
-        bone_mass   = findf(r'Bone\s+Mass\s+([\d.]+)\s*kg')
-        protein_m   = findf(r'Protein\s+Mass\s+([\d.]+)\s*kg')
-        protein_pct = findf(r'Protein\s+([\d.]+)\s*%')
-        water_wt    = findf(r'Water\s+Weight\s+([\d.]+)\s*kg')
-        body_water  = findf(r'Body\s+Water\s+([\d.]+)\s*%')
-        subcut_fat  = findf(r'Sub\w+\s+(?:fat\s+)?([\d.]+)\s*%')
-        visceral    = findf(r'Visceral\s+Fat\s+([\d.]+)')
-        # BMR – OCR splits "1554kcal" as "155 4kcal"
-        m_bmr       = re.search(r'BMR\s+([\d\s]+?)\s*kcal', flat, re.IGNORECASE)
-        bmr         = int(m_bmr.group(1).replace(" ", "")) if m_bmr else None
-        body_age    = find_intf(r'Body\s+age\s+(\d+)')
-        # Ideal weight – specifically "Ideal body weight 68.2kg"
-        ideal_wt    = findf(r'Ideal\s+body\s+weight\s+([\d.]+)\s*kg')
-        obesity_lvl = find_strf(r'Obesity\s+level\s+(\w+)')
-        # Body type – "Slightly\n\nBody type\nJ fat" → "Slightly fat"
-        m_bt        = re.search(r'Body\s+type\s*\n[J\s]*([\w]+(?:\s+[\w]+)?)', text, re.IGNORECASE)
-        body_type   = m_bt.group(1).strip() if m_bt else None
-        m_qual      = re.search(r'(Slightly|Athletic|Muscular|Thin|Standard|Obese)\s*\n+\s*Body\s+type', text, re.IGNORECASE)
-        if m_qual and body_type:
-            body_type = f"{m_qual.group(1).strip()} {body_type}"
-
-        if weight is None:
-            st.warning("Could not read weight from image. Please check the image quality.")
+        # Call Claude vision API
+        api_key = st.secrets.get("anthropic_api_key", "")
+        if not api_key:
+            st.error("Anthropic API key not found in secrets.")
             return None
 
+        prompt = """This is a screenshot from the Fitdays body composition scale app.
+Extract ALL of the following values exactly as shown. Return ONLY a JSON object with these keys
+(use null if a value is not visible):
+date (YYYY-MM-DD format, parsed from the timestamp shown),
+weight_kg, bmi, body_fat_pct, fat_mass_kg, fat_free_weight_kg,
+heart_rate_scale_bpm, cardiac_index,
+muscle_mass_kg, muscle_rate_pct, skeletal_muscle_pct,
+bone_mass_kg, protein_mass_kg, protein_pct,
+water_weight_kg, body_water_pct, subcutaneous_fat_pct,
+visceral_fat, bmr_kcal, body_age, ideal_weight_kg,
+obesity_level, body_type.
+Return only the JSON object, no explanation, no markdown."""
+
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key":         api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type":      "application/json"
+            },
+            json={
+                "model":      "claude-opus-4-5",
+                "max_tokens": 1000,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image",
+                         "source": {"type": "base64",
+                                    "media_type": media_type,
+                                    "data": img_b64}},
+                        {"type": "text", "text": prompt}
+                    ]
+                }]
+            },
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            st.error(f"Claude API error: {response.status_code}")
+            return None
+
+        raw_text = response.json()["content"][0]["text"].strip()
+        # Strip markdown code fences if present
+        raw_text = re.sub(r"^```json\s*|```$", "", raw_text.strip(), flags=re.MULTILINE).strip()
+        data     = json.loads(raw_text)
+
+        # Parse date
+        date_str = data.get("date") or datetime.now().strftime("%Y-%m-%d")
+        try:
+            date_str = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
         # Auto-status using our benchmarks
+        visceral = data.get("visceral_fat")
+        body_fat = data.get("body_fat_pct")
         status_parts = []
-        if visceral:  status_parts.append(vf_status(visceral))
-        if body_fat:  status_parts.append(bf_status(body_fat))
+        if visceral:  status_parts.append(vf_status(float(visceral)))
+        if body_fat:  status_parts.append(bf_status(float(body_fat)))
         overall = "⚠️ Attention" if any("⚠️" in s for s in status_parts) else \
                   "🟡 Caution"   if any("🟡" in s for s in status_parts) else "✅ Good"
 
         return {
-            "datetime":              date_str + " 00:00",
-            "date":                  date_str,
-            "source":                "fitdays_image",
-            "weight_kg":             weight,
-            "bmi":                   bmi_val,
-            "body_fat_pct":          body_fat,
-            "fat_mass_kg":           fat_mass,
-            "fat_free_weight_kg":    fat_free,
-            "heart_rate_scale_bpm":  hr_scale,
-            "cardiac_index":         cardiac_idx,
-            "muscle_mass_kg":        muscle_mass,
-            "muscle_rate_pct":       muscle_rate,
-            "skeletal_muscle_pct":   skel_muscle,
-            "bone_mass_kg":          bone_mass,
-            "protein_mass_kg":       protein_m,
-            "protein_pct":           protein_pct,
-            "water_weight_kg":       water_wt,
-            "body_water_pct":        body_water,
-            "subcutaneous_fat_pct":  subcut_fat,
-            "visceral_fat":          visceral,
-            "bmr_kcal":              bmr,
-            "body_age":              body_age,
-            "ideal_weight_kg":       ideal_wt,
-            "obesity_level":         obesity_lvl,
-            "body_type":             body_type,
-            "status":                overall
+            "datetime":             date_str + " 00:00",
+            "date":                 date_str,
+            "source":               "fitdays_image",
+            "weight_kg":            data.get("weight_kg"),
+            "bmi":                  data.get("bmi"),
+            "body_fat_pct":         data.get("body_fat_pct"),
+            "fat_mass_kg":          data.get("fat_mass_kg"),
+            "fat_free_weight_kg":   data.get("fat_free_weight_kg"),
+            "heart_rate_scale_bpm": data.get("heart_rate_scale_bpm"),
+            "cardiac_index":        data.get("cardiac_index"),
+            "muscle_mass_kg":       data.get("muscle_mass_kg"),
+            "muscle_rate_pct":      data.get("muscle_rate_pct"),
+            "skeletal_muscle_pct":  data.get("skeletal_muscle_pct"),
+            "bone_mass_kg":         data.get("bone_mass_kg"),
+            "protein_mass_kg":      data.get("protein_mass_kg"),
+            "protein_pct":          data.get("protein_pct"),
+            "water_weight_kg":      data.get("water_weight_kg"),
+            "body_water_pct":       data.get("body_water_pct"),
+            "subcutaneous_fat_pct": data.get("subcutaneous_fat_pct"),
+            "visceral_fat":         visceral,
+            "bmr_kcal":             data.get("bmr_kcal"),
+            "body_age":             data.get("body_age"),
+            "ideal_weight_kg":      data.get("ideal_weight_kg"),
+            "obesity_level":        data.get("obesity_level"),
+            "body_type":            data.get("body_type"),
+            "status":               overall
         }
     except Exception as e:
         st.error(f"Image scan error: {e}")
